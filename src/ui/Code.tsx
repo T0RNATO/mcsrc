@@ -50,7 +50,8 @@ function findTokenAtPosition(
 
     for (const token of decompileResult.tokens) {
         if (targetOffset >= token.start && targetOffset <= token.start + token.length) {
-            const className = token.className + ".class";
+            const baseClassName = token.className.split('$')[0];
+            const className = baseClassName + ".class";
             if (classList.includes(className)) {
                 return token;
             }
@@ -68,12 +69,13 @@ async function setClipboard(text: string): Promise<void> {
     await navigator.clipboard.writeText(text);
 }
 
-function jumpToToken(result: DecompileResult, targetType: 'method' | 'field', target: string, editor: editor.ICodeEditor, sameFile = false) {
+function jumpToToken(result: DecompileResult, targetType: 'method' | 'field' | 'class', target: string, editor: editor.ICodeEditor, sameFile = false) {
     for (const token of result.tokens) {
         if (!(token.declaration && token.type == targetType)) continue;
         if (
-            !(targetType === "method" && token.descriptor === target) &&
-            !(targetType === "field" && token.name === target)
+            !(targetType === "method" && "descriptor" in token && token.descriptor === target) &&
+            !(targetType === "field" && "name" in token && token.name === target) &&
+            !(targetType === "class" && token.className === target)
         ) continue;
 
         const sourceUpTo = result.source.slice(0, token.start);
@@ -156,9 +158,11 @@ const Code = () => {
 
                     if (targetOffset >= token.start && targetOffset <= token.start + token.length) {
                         const className = token.className + ".class";
+                        const baseClassName = token.className.split('$')[0] + ".class";
                         console.log(`Found token for definition: ${className} at offset ${token.start}`);
 
-                        if (classList && classList.includes(className)) {
+                        if (classList && (classList.includes(className) || classList.includes(baseClassName))) {
+                            const targetClass = className;
                             const range = new Range(lineNumber, column, lineNumber, column + token.length);
 
                             return {
@@ -193,22 +197,35 @@ const Code = () => {
                 }
 
                 const className = resource.path.substring(1);
+                const baseClassName = className.includes('$') ? className.split('$')[0] + ".class" : className;
                 console.log(className);
+                console.log(baseClassName);
 
-                const jumpInSameFile = className === activeTabKey.value;
+                const jumpInSameFile = baseClassName === activeTabKey.value;
                 const fragment = resource.fragment.split(":") as ['method' | 'field', string];
                 if (fragment.length === 2) {
                     const [targetType, target] = fragment;
                     if (jumpInSameFile) {
                         jumpToToken(decompileResult!, targetType, target, editor, true);
                     } else {
-                        const subscription = currentResult.pipe(filter(value => value.className === className), take(1)).subscribe(value => {
+                        const subscription = currentResult.pipe(filter(value => value.className === baseClassName), take(1)).subscribe(value => {
                             subscription.unsubscribe();
                             jumpToToken(value, targetType, target, editor);
                         });
                     }
+                } else if (baseClassName != className) {
+                    // Handle inner class navigation
+                    const innerClassName = className.replace('.class', '');
+                    if (jumpInSameFile) {
+                        jumpToToken(decompileResult!, 'class', innerClassName, editor, true);
+                    } else {
+                        const subscription = currentResult.pipe(filter(value => value.className === baseClassName), take(1)).subscribe(value => {
+                            subscription.unsubscribe();
+                            jumpToToken(value, 'class', innerClassName, editor);
+                        });
+                    }
                 }
-                openTab(className);
+                openTab(baseClassName);
                 return true;
             }
         });
@@ -368,42 +385,46 @@ const Code = () => {
 
     // Scroll to top when source changes, or to specific line if specified
     useEffect(() => {
-        if (editorRef.current) {
+        if (editorRef.current && decompileResult) {
+            const editor = editorRef.current;
             const currentTab = openTabs.value.find(tab => tab.key === activeTabKey.value);
             const prevTab = openTabs.value.find(tab => tab.key === tabHistory.value.at(-2));
             if (prevTab) {
-                prevTab.scroll = editorRef.current.getScrollTop();
+                prevTab.scroll = editor.getScrollTop();
             }
-            const currentLine = currentState?.line;
-            editorRef.current.setPosition({ lineNumber: currentLine ?? 1, column: 1 });
+
             lineHighlightRef.current?.clear();
 
-            // Default: scroll to top
-            let targetScroll = 0;
+            const executeScroll = () => {
+                const currentLine = state.value?.line;
+                if (currentLine) {
+                    const lineEnd = state.value?.lineEnd ?? currentLine;
+                    editor.setSelection(new Range(currentLine, 1, currentLine, 1));
+                    editor.revealLinesInCenterIfOutsideViewport(currentLine, lineEnd);
 
-            // Fold imports when content changes: `foldingImportsByDefault` has a bug where it only folds once.
-            editorRef.current.getAction('editor.foldAll')?.run().then(() => {
-                editorRef.current!.setScrollTop(targetScroll);
-            })
+                    // Highlight the line range
+                    lineHighlightRef.current = editor.createDecorationsCollection([{
+                        range: new Range(currentLine, 1, lineEnd, 1),
+                        options: {
+                            isWholeLine: true,
+                            className: 'highlighted-line',
+                            glyphMarginClassName: 'highlighted-line-glyph'
+                        }
+                    }]);
+                } else if (currentTab && currentTab.scroll > 0) {
+                    editor.setScrollTop(currentTab.scroll);
+                } else {
+                    editor.setScrollTop(0);
+                }
+            };
 
-            if (currentLine) {
-                const lineEnd = currentState?.lineEnd ?? currentLine;
-
-                // Scroll to the specified lines
-                editorRef.current.revealLinesInCenterIfOutsideViewport(currentLine, lineEnd);
-
-                // Highlight the line range
-                lineHighlightRef.current = editorRef.current.createDecorationsCollection([{
-                    range: new Range(currentLine, 1, lineEnd, 1),
-                    options: {
-                        isWholeLine: true,
-                        className: 'highlighted-line',
-                        glyphMarginClassName: 'highlighted-line-glyph'
-                    }
-                }]);
-            } else if (currentTab && currentTab.scroll > 0) {
-                targetScroll = currentTab.scroll;
-            }
+            // Wait for folding to complete and DOM to settle
+            editor.getAction('editor.foldAll')?.run().then(() => {
+                // Use requestAnimationFrame to ensure Monaco has finished layout
+                requestAnimationFrame(() => {
+                    executeScroll();
+                });
+            });
         }
     }, [decompileResult, currentState?.line, currentState?.lineEnd]);
 
