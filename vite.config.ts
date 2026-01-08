@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 import { comlink } from "vite-plugin-comlink";
 import react from '@vitejs/plugin-react';
 
@@ -8,6 +8,9 @@ export default defineConfig({
   worker: {
     plugins: () => [comlink()],
     format: 'es',
+  },
+  test: {
+    exclude: ['**/node_modules/**', '**/dist/**', 'tests/**'],
   },
   // For javadoc API during development
   server: {
