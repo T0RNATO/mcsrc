@@ -356,16 +356,8 @@ const Code = () => {
                             break;
 
                         case 'parameter':
-                            contents.push({
-                                value: `**Parameter**\n\n**Class:** \`${formattedClassName}\``
-                            });
-                            break;
-
                         case 'local':
-                            contents.push({
-                                value: `**Local variable**\n\n**Class:** \`${formattedClassName}\``
-                            });
-                            break;
+                            return null;
                     }
 
                     return {
